@@ -1,0 +1,32 @@
+node_modules/
+.env
+.env.local
+
+# Google service account keys and the cached OAuth token - never commit
+*service-account*.json
+.drive-oauth-token.json
+*.log
+npm-debug.log*
+
+# Runtime output (extracted zips, rendered pages, generated reports)
+.tmp/
+output/
+reports/*.json
+reports/*.md
+!reports/.gitkeep
+
+# Local test files you drop in for manual/live testing - never commit
+# real customer documents/images.
+/samples/
+
+.DS_Store
+coverage/
+
+# Test fixtures are generated on demand by test/fixtures/generate-fixtures.mjs
+# (runs automatically via the "pretest" npm script) - not committed.
+test/fixtures/*.png
+test/fixtures/*.pdf
+test/fixtures/*.docx
+test/fixtures/*.pptx
+test/fixtures/*.zip
+test/fixtures/*.tmp
