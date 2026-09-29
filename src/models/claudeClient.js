@@ -1,4 +1,3 @@
-import Anthropic from '@anthropic-ai/sdk';
 import { BaseModelClient } from './baseModelClient.js';
 import { config, hasClaudeCredentials } from '../config.js';
 import { MissingCredentialsError, ModelRequestError } from '../utils/errors.js';
@@ -6,14 +5,30 @@ import { withRetry } from '../utils/retry.js';
 
 const MAX_OUTPUT_TOKENS = 4096;
 
+// The SDK is only loaded when an analysis actually runs. Reading files
+// into JSON never needs it, so it shouldn't cost startup time there.
+let sdkPromise;
+function loadSdk() {
+  sdkPromise ??= import('@anthropic-ai/sdk').then((m) => m.default);
+  return sdkPromise;
+}
+
 export class ClaudeClient extends BaseModelClient {
   constructor() {
     super();
     if (!hasClaudeCredentials()) {
       throw new MissingCredentialsError('Claude', 'ANTHROPIC_API_KEY');
     }
-    this.client = new Anthropic({ apiKey: config.anthropic.apiKey });
+    this.client = null;
     this.model = config.anthropic.model;
+  }
+
+  async sdk() {
+    if (!this.client) {
+      const Anthropic = await loadSdk();
+      this.client = new Anthropic({ apiKey: config.anthropic.apiKey });
+    }
+    return this.client;
   }
 
   /** @param {import('./baseModelClient.js').ModelInput} input */
@@ -28,8 +43,9 @@ export class ClaudeClient extends BaseModelClient {
 
     const start = Date.now();
     try {
+      const client = await this.sdk();
       const response = await withRetry(() =>
-        this.client.messages.create({
+        client.messages.create({
           model: this.model,
           max_tokens: MAX_OUTPUT_TOKENS,
           messages: [{ role: 'user', content }],

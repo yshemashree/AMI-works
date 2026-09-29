@@ -20,7 +20,7 @@ export async function analyzeDocument(client, extracted, { concurrency = 3 } = {
 
   const tasks = extracted.images.map((image) => async () =>
     analyzeImage(client, image, isFullPageRender
-      ? { fileName, pageLabel: `page ${image.pageNumber}`, surroundingText: extracted.text }
+      ? { fileName, pageLabel: `page ${image.pageNumber}`, surroundingText: image.pageText ?? extracted.text }
       : { fileName, context: `Image embedded in ${fileName}` }));
 
   const visualAnalyses = await runWithConcurrency(tasks, concurrency);
@@ -31,6 +31,10 @@ export async function analyzeDocument(client, extracted, { concurrency = 3 } = {
     extractedText: extracted.text,
     pageCount: extracted.pageCount ?? extracted.slideCount ?? null,
     visualAnalyses,
+    // The full reader output (text, tables, native charts, metadata),
+    // so a report carries what was read for free alongside what the
+    // model said about the pictures.
+    document: extracted.document,
   };
 }
 

@@ -1,6 +1,7 @@
 import path from 'node:path';
-import { extractFile, isSupportedExtension } from '../extractors/index.js';
-import { extractZip } from '../ingestion/zipExtractor.js';
+import { fileSource } from '../reader/index.js';
+import { resolveInputs } from '../pipeline/localInputs.js';
+import { forEachExtracted } from '../pipeline/analyze.js';
 import { analyzeDocument } from '../analysis/analyzeDocument.js';
 import { createModelClient } from '../models/index.js';
 import * as metrics from './metrics.js';
@@ -16,22 +17,25 @@ const PROVIDERS = ['claude', 'qwen'];
  * @param {Object} [options]
  * @param {Object} [options.groundTruth] - { "<fileName>": { expectedKeywords: string[] } }
  */
-export async function runComparison(inputPaths, { groundTruth = {} } = {}) {
-  const files = resolveInputFiles(inputPaths);
-  const clients = Object.fromEntries(PROVIDERS.map((p) => [p, createModelClient(p)]));
+export async function runComparison(inputPaths, { groundTruth = {}, visionPages = 'auto', clients: injected } = {}) {
+  const files = resolveInputs(inputPaths);
+  const clients = injected || Object.fromEntries(PROVIDERS.map((p) => [p, createModelClient(p)]));
 
   const perFile = [];
-  for (const filePath of files) {
-    logger.info(`Comparing: ${path.basename(filePath)}`);
-    const extracted = await extractFile(filePath);
+  for (const inputPath of files) {
+    // Both providers get the exact same extracted visuals, so skipping
+    // text-only pages keeps the comparison fair while halving the bill.
+    await forEachExtracted(await fileSource(inputPath), { visionPages }, async (extracted) => {
+      const { filePath } = extracted;
+      logger.info(`Comparing: ${filePath}`);
+      const [claudeDoc, qwenDoc] = await Promise.all([
+        analyzeDocument(clients.claude, extracted),
+        analyzeDocument(clients.qwen, extracted),
+      ]);
 
-    const [claudeDoc, qwenDoc] = await Promise.all([
-      analyzeDocument(clients.claude, extracted),
-      analyzeDocument(clients.qwen, extracted),
-    ]);
-
-    const fileGroundTruth = groundTruth[path.basename(filePath)];
-    perFile.push(buildFileComparison(filePath, extracted, { claude: claudeDoc, qwen: qwenDoc }, fileGroundTruth));
+      const fileGroundTruth = groundTruth[path.basename(filePath)];
+      perFile.push(buildFileComparison(filePath, extracted, { claude: claudeDoc, qwen: qwenDoc }, fileGroundTruth));
+    });
   }
 
   return {
@@ -39,21 +43,6 @@ export async function runComparison(inputPaths, { groundTruth = {} } = {}) {
     files: perFile,
     aggregate: buildAggregate(perFile),
   };
-}
-
-function resolveInputFiles(inputPaths) {
-  const files = [];
-  for (const inputPath of inputPaths) {
-    if (inputPath.toLowerCase().endsWith('.zip')) {
-      const { files: extracted } = extractZip(inputPath);
-      files.push(...extracted.filter(isSupportedExtension));
-    } else if (isSupportedExtension(inputPath)) {
-      files.push(inputPath);
-    } else {
-      logger.warn(`Skipping unsupported file: ${inputPath}`);
-    }
-  }
-  return files;
 }
 
 function buildFileComparison(filePath, extracted, docsByProvider, fileGroundTruth) {
