@@ -2,7 +2,7 @@ import { test, describe, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { analyzeImage } from '../src/analysis/analyzeImage.js';
 import { analyzeDocument } from '../src/analysis/analyzeDocument.js';
-import { extractFile } from '../src/extractors/index.js';
+import { extractFile } from '../src/reader/index.js';
 import { MockModelClient, sampleAnalysisJson } from './helpers/mockModelClient.js';
 import { generateFixtures } from './fixtures/generate-fixtures.mjs';
 
