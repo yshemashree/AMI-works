@@ -2,91 +2,109 @@
 
 ## Requirements
 
-- Node.js >= 18.17 (developed and tested on Node 22)
-- npm
-- A Claude API key from [console.anthropic.com](https://console.anthropic.com/) - required for `--provider claude` and for `ami compare`
-- A DashScope (Qwen) API key from [dashscope.console.aliyun.com](https://dashscope.console.aliyun.com/) - required for `--provider qwen` and for `ami compare`
+- Node.js ≥ 18.17 (developed on Node 22) and npm
+- Optional: Python 3.9+ for the MarkItDown worker (richer markdown from Office files, and `.xls` support)
+- Optional, for Drive: a Google Cloud OAuth client (Desktop app) and/or a service account
+- Optional, for image understanding only: `ANTHROPIC_API_KEY` and/or `DASHSCOPE_API_KEY`
 
-No system packages (no poppler, no cairo/pango, no build toolchain) are required. PDF page rasterization uses `pdfjs-dist` + `@napi-rs/canvas`, which ships prebuilt native binaries for common platforms - `npm install` does not compile anything.
+No system packages are needed. PDF rendering uses `pdfjs-dist` + `@napi-rs/canvas`, which ship prebuilt binaries.
 
 ## Install
 
 ```bash
 npm install
+cp .env.example .env
+pip install -r src/markitdown/requirements.txt   # optional
 ```
 
-## Configure credentials
+Without the pip step everything still works with the built-in readers.
+The GUI's status bar shows which one is active.
+
+## Read files - no keys needed
 
 ```bash
-cp .env.example .env
+node bin/ami.js read ./samples/report.pdf ./samples/uploads.zip --out output
 ```
 
-Then edit `.env` and fill in:
+One `<file>.json` per input. See [ARCHITECTURE.md](./ARCHITECTURE.md#the-json-document-amidocumentv1) for the shape.
 
+## Google Drive
+
+1. In Google Cloud Console, enable the **Google Drive API**, then create
+   an **OAuth client ID** of type **Desktop app**. Put its id and secret
+   in `.env` (`GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`).
+2. Set `DRIVE_FOLDER_ID` to the folder you work in (the id at the end of
+   its Drive URL).
+3. Sign in once, either with **Connect Google Drive** in the GUI or with
+   `node bin/ami.js drive-login`. The token is saved to
+   `.drive-oauth-token.json` (gitignored) and refreshed automatically.
+
+The signed-in account is used for both uploads and reads. A service
+account (`GOOGLE_SERVICE_ACCOUNT_KEY_PATH`) is optional. If it's set,
+it's used for reads, which suits a server with no signed-in user. It
+can't upload, because service accounts have no Drive storage of their own.
+
+```bash
+node bin/ami.js drive-read --folder <id> --out output/drive
 ```
-ANTHROPIC_API_KEY=sk-ant-...
-DASHSCOPE_API_KEY=sk-...
+
+## The GUI
+
+```bash
+npm run gui          # http://127.0.0.1:4300
 ```
 
-`.env` is gitignored. Never commit real keys - `.env.example` exists specifically so the required variable names are documented without exposing values.
+- **Upload to Drive + read**: drag files in. They're streamed to the
+  folder and read into JSON in the same pass, with the checksum verified
+  against Drive.
+- **Read only**: get the JSON without storing the file anywhere.
+- **Drive folder** panel: browse, open subfolders, read one file or the
+  whole folder. Files already read show as *Ready* and open instantly.
 
-Environment variables read by the app (see `src/config.js`):
+The GUI listens on 127.0.0.1 only. To expose it on a network, set
+`GUI_HOST=0.0.0.0` **and** `GUI_ACCESS_KEY`, then open
+`http://<host>:4300/?key=<GUI_ACCESS_KEY>` once. The server refuses to
+start on a non-local address without a key. For Google sign-in on a
+non-local host, the OAuth client needs that host's
+`/auth/google/callback` as an authorised redirect (a "Web application"
+client). Desktop-app clients only accept localhost.
 
-| Variable | Required for | Default |
+## Settings
+
+All in `.env` (see `.env.example`, read in `src/config.js`):
+
+| Variable | Default | What it does |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | `--provider claude`, `compare` | none |
-| `CLAUDE_MODEL` | - | `claude-sonnet-5` |
-| `DASHSCOPE_API_KEY` | `--provider qwen`, `compare` | none |
-| `QWEN_MODEL` | - | `qwen-vl-max` |
-| `DASHSCOPE_BASE_URL` | - | `https://dashscope.aliyuncs.com/api/v1` |
-| `MAX_IMAGE_DIMENSION` | - | `2000` (px, longest side) |
-| `WORK_DIR` | - | `.tmp` (extracted ZIPs / rendered pages) |
+| `DRIVE_FOLDER_ID` | - | default folder for CLI and GUI |
+| `GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` | - | user sign-in (uploads + reads) |
+| `GOOGLE_SERVICE_ACCOUNT_KEY_PATH` | - | optional read-only service account |
+| `RANGE_THRESHOLD_MB` | 32 | above this, ZIP/Office/PDF files are read by byte range |
+| `MAX_IN_MEMORY_MB` | 200 | cap for anything read whole |
+| `MEMORY_BUDGET_MB` | 512 | total RAM parallel reads may hold |
+| `READ_CONCURRENCY` | 3 | files read in parallel from a folder |
+| `MARKITDOWN` | auto | `auto` or `off` |
+| `AMI_PYTHON_BIN` | python3 | interpreter for the worker (e.g. a venv) |
+| `CACHE_DIR` | - | persist extracted JSON by content hash; empty = memory only |
+| `GUI_HOST` / `GUI_PORT` | 127.0.0.1 / 4300 | |
+| `GUI_ACCESS_KEY` | - | required for non-local hosts |
+| `MAX_UPLOAD_MB` | 1024 | per-file upload cap, enforced while streaming |
+| `ANTHROPIC_API_KEY`, `CLAUDE_MODEL`, `DASHSCOPE_API_KEY`, `QWEN_MODEL`, `DASHSCOPE_BASE_URL` | - | image understanding only |
+| `MAX_IMAGE_DIMENSION` | 2000 | images are scaled to this before going to a model |
 
-## Run the test suite
+## Image understanding and the comparison
+
+```bash
+node bin/ami.js analyze ./samples --provider qwen
+node bin/ami.js compare ./samples --ground-truth ./ground-truth.json --out reports
+```
+
+By default only PDF pages and pictures the reader flagged as visual are
+sent to a model. Add `--all-pages` to send every PDF page. See
+[RESULTS.md](./RESULTS.md) for the comparison's status and ground-truth
+format.
+
+## Tests
 
 ```bash
 npm test
 ```
-
-This generates small deterministic fixtures (`test/fixtures/generate-fixtures.mjs`, run automatically via the `pretest` script) and runs 45 unit tests with Node's built-in test runner - no API keys or network access required, because model calls are mocked in these tests (see `test/helpers/mockModelClient.js`). See [TESTING.md](./TESTING.md) for what is and isn't covered by this.
-
-## Analyze files
-
-```bash
-# Single file, single provider
-node bin/ami.js analyze ./samples/report.pdf --provider claude
-
-# A ZIP - extracted and every supported file inside it processed
-node bin/ami.js analyze ./samples/uploads.zip --provider qwen --out output/qwen-run
-
-# A whole directory (recurses into subfolders and any ZIPs found)
-node bin/ami.js analyze ./samples --provider claude
-```
-
-Output: one JSON file per input file in the output directory (default `output/`), named `<original-filename>.<provider>.json`.
-
-## Run the Qwen vs Claude comparison
-
-```bash
-node bin/ami.js compare ./samples --out reports
-```
-
-Requires both `ANTHROPIC_API_KEY` and `DASHSCOPE_API_KEY` to be set - the comparison is only meaningful when both models actually ran. Output: `reports/comparison-report.json` (full data) and `reports/comparison-report.md` (human-readable summary + recommendation).
-
-### With ground truth (for a real accuracy score)
-
-Automated metrics alone (JSON-parse success, latency, visual-element counts, cross-model agreement) measure reliability and consistency, not correctness - there's no way to know a model is *right* without knowing the right answer. To get an actual accuracy score, supply expected keywords/facts per file:
-
-```json
-// ground-truth.json
-{
-  "report.pdf": { "expectedKeywords": ["Q3 revenue", "$4.2M", "12% growth", "Acme Corp"] },
-  "deck.pptx": { "expectedKeywords": ["roadmap", "Q1 2027", "3 phases"] }
-}
-```
-
-```bash
-node bin/ami.js compare ./samples --ground-truth ./ground-truth.json --out reports
-```
-
-The report will then include a real `averageKeywordRecall` per provider and the recommendation section will name an accuracy winner instead of stating that no ground truth was supplied.

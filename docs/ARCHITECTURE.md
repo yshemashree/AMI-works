@@ -1,78 +1,159 @@
 # Architecture
 
-## Goals that shaped the design
+## Components
 
-1. **One extraction pipeline, any model.** The extractors (`src/extractors/`) know nothing about Claude or Qwen. They turn a file into plain data: text plus a list of `{ base64, mimeType }` images. The model clients (`src/models/`) know nothing about ZIPs, PDFs, or PPTX. This split means adding a third model later, or a fifth file format, touches one module, not the whole pipeline.
-2. **Visual content is never optional.** The spec requires analyzing charts/diagrams/tables/screenshots inside documents, not just body text. Text extraction alone cannot do that (a bar chart has no text layer). So every document type produces at least one image per document, even PDFs and DOCX/PPTX files that "just" contain text - see [PROCESSING_FLOW.md](./PROCESSING_FLOW.md) for how each format is turned into images.
-3. **Reliability over token efficiency.** Per the project priority, the code retries transient model-API failures (429/5xx) instead of failing a whole batch on one blip, validates ZIP input against zip-slip and zip-bomb style abuse, and never throws away a malformed model response - it's recorded as a parse failure instead of crashing the run.
+The code is split into components that each do one job and talk to each
+other through small, explicit interfaces. Each has an `index.js` that is
+its public surface. Nothing reaches into another component's files.
+
+```
+              ┌──────────────┐        ┌──────────────┐
+  browser ───▶│  server/     │───────▶│  pipeline/   │◀─── CLI (src/index.js)
+              │  GUI + HTTP  │        │  wiring,     │
+              └──────────────┘        │  cache,      │
+                                      │  mem budget  │
+                                      └──┬────┬───┬──┘
+                        Source (bytes)   │    │   │  converter (optional)
+                   ┌─────────────────────┘    │   └──────────────┐
+                   ▼                          ▼                  ▼
+            ┌─────────────┐           ┌─────────────┐     ┌──────────────┐
+            │  drive/     │           │  reader/    │────▶│ markitdown/  │
+            │  list, read,│           │  bytes→JSON │     │ Python worker│
+            │  range,     │           │  per format │     └──────────────┘
+            │  upload     │           └──────┬──────┘
+            └─────────────┘                  │ visuals (only when asked)
+                                             ▼
+                                  ┌───────────────────────┐
+                                  │ analysis/ models/     │  optional: vision
+                                  │ comparison/           │  model calls
+                                  └───────────────────────┘
+```
+
+| Component | Knows about | Doesn't know about |
+|---|---|---|
+| `src/reader/` | file formats: PDF, DOCX, PPTX, XLSX, images, text, ZIP | Drive, HTTP, models, disk |
+| `src/drive/` | Google Drive: auth, listing, byte ranges, exports, uploads | file formats |
+| `src/markitdown/` | running Microsoft MarkItDown in a long-lived Python worker | where bytes come from |
+| `src/pipeline/` | wiring the above; caching by content hash; the memory budget | HTTP, HTML |
+| `src/server/` | HTTP routes and the browser UI | Drive and formats (it only calls the pipeline) |
+| `src/analysis/`, `src/models/`, `src/comparison/` | vision-model calls and the Qwen vs Claude comparison | Drive, ZIPs, formats |
+
+### The one interface that ties it together: `Source`
+
+```js
+{
+  name, size, mimeType, origin, meta,
+  readAll({ maxBytes }) -> Promise<Buffer>
+  readRange(start, end) -> Promise<Buffer>   // optional
+}
+```
+
+`src/reader/sources.js` has `bufferSource` (uploads) and `fileSource`
+(local files). `src/drive/source.js` has `driveSource`. The reader only
+ever sees a Source, so a new storage backend (S3, WhatsApp media URLs,
+...) means writing one more Source, with no changes to the reader.
 
 ## Module map
 
 ```
 src/
-  config.js              # Reads .env once; nothing else touches process.env directly
-  ingestion/
-    zipExtractor.js       # ZIP -> files on disk, with zip-slip/zip-bomb guards
-    pathResolver.js        # CLI input (file | dir | zip) -> flat list of supported files
-  extractors/
-    fileTypeDetector.js    # extension + magic-byte sniffing -> category
-    imageExtractor.js      # image file -> [{ base64, mimeType, width, height }]
-    pdfExtractor.js        # PDF -> per-page text + per-page rendered PNG
-    docxExtractor.js       # DOCX -> full text + embedded images
-    pptxExtractor.js       # PPTX -> per-slide text + embedded images
-    index.js               # dispatches by category, normalizes output shape
-  models/
-    baseModelClient.js     # shared response shape (JSDoc contract)
-    claudeClient.js         # @anthropic-ai/sdk wrapper
-    qwenClient.js            # DashScope (Qwen-VL) HTTP wrapper
-    index.js                  # createModelClient(provider)
-  analysis/
-    promptTemplates.js       # fixed-JSON-shape prompts for images vs. document pages
-    responseParser.js         # defensive JSON extraction from model text
-    analyzeImage.js            # one image -> one model call -> parsed result
-    analyzeDocument.js          # runs analyzeImage over every visual in a document, bounded concurrency
-  comparison/
-    metrics.js                 # parse rate, latency, text agreement, keyword recall, failures
-    runComparison.js            # same inputs through both providers, same prompts
-    reportGenerator.js           # JSON + Markdown report, with a metrics-derived recommendation
-  index.js                       # CLI command implementations (analyze, compare)
-  utils/
-    errors.js, logger.js, retry.js
-bin/ami.js                        # CLI entry point (#!/usr/bin/env node)
+  config.js                  every env setting, read once
+  index.js                   CLI: read, drive-read, gui, analyze, compare, drive-*
+  reader/
+    index.js                 readDocument(source, options) -> { document, visuals }
+    sources.js               bufferSource, fileSource
+    detect.js                extension / mime / magic-byte type detection
+    document.js              the JSON shape, image registry (dedupe + vision verdicts)
+    zip.js                   ZIP from a buffer or byte ranges; limits
+    rangeCache.js            block-aligned range reads with an LRU
+    office.js                shared OOXML bits: properties, rels, charts, media, slim package
+    imageInfo.js             image dimensions from headers
+    legacy.js                adapter to the shape the analysis stage expects
+    formats/  pdf.js docx.js pptx.js xlsx.js image.js text.js archive.js markdown.js
+  drive/
+    index.js                 public API + authStatus()
+    auth.js                  service account client, callDrive() error wrapping
+    oauth.js                 user sign-in (CLI and browser flows)
+    folder.js                listing, id validation, Google-native exports
+    source.js                driveSource (buffer / range / export), collect()
+    upload.js                streaming uploads
+  markitdown/
+    index.js  client.js  worker.py  requirements.txt
+  pipeline/
+    index.js                 createPipeline(): listDrive, readDriveFile/Folder, uploadAndRead, readUpload, readLocal
+    cache.js                 ResultCache (MD5-keyed JSON, memory + optional dir)
+    budget.js                MemoryBudget, mapLimit
+    analyze.js               forEachExtracted(): reader -> analysis stage, ZIP children one by one
+    localInputs.js           CLI paths -> file list
+  server/
+    index.js                 routes, streaming multipart, OAuth, access key, static files
+    public/                  index.html, styles.css, js/{main,api,dom}.js, js/components/*
+  analysis/  models/  comparison/  utils/
 ```
 
-## Data flow (high level)
+## The JSON document (`ami.document/v1`)
 
+Every format produces the same shape, so whatever consumes it (the GUI,
+a database, the analysis stage) never branches on file type:
+
+```jsonc
+{
+  "schema": "ami.document/v1",
+  "source":   { "name", "type", "mimeType", "sizeBytes", "origin", "driveFileId?", "md5?", "path?" },
+  "metadata": { "title?", "author?", "created?", "modified?", "application?", ... },
+  "stats":    { "pages?", "slides?", "sheets?", "files?", "words", "characters", "images", "uniqueImages",
+                "charts", "sectionsNeedingVision", "imagesNeedingVision" },
+  "text":     "plain text of the whole document",
+  "markdown": "markdown with headings/tables (MarkItDown or built-in) or null",
+  "sections": [ { "kind": "page|slide|sheet|body|image|file", "number", "title?", "text", "notes?",
+                  "needsVision", "visionReason" } ],
+  "images":   [ { "id", "name", "mimeType", "width", "height", "bytes", "section", "duplicateOf",
+                  "needsVision", "visionReason" } ],
+  "charts":   [ { "id", "type", "title", "slide?|sheet?", "series": [ { "name", "categories", "values" } ] } ],
+  "children": [ /* one document per file, for ZIPs */ ],
+  "skipped?": [ { "name", "reason" } ],
+  "warnings": [ "..." ],
+  "error?":   { "code", "message" },          // only on a child that couldn't be read
+  "engine":   { "reader", "markdown", "strategy": "buffer|range" },
+  "timings":  { "totalMs" }
+}
 ```
-input (file / dir / ZIP)
-        │
-        ▼
-pathResolver / zipExtractor      → flat list of supported file paths
-        │
-        ▼
-extractors/index.js (per file)   → { category, text, images[] }
-        │
-        ▼
-analyzeDocument (per file)       → runs analyzeImage over every image, N-way concurrent
-        │
-        ▼
-analyzeImage (per image)         → prompt + image → model client → parsed JSON result
-        │
-        ├── single-provider run  → CLI writes one JSON report per file (`ami analyze`)
-        └── two-provider run     → runComparison + reportGenerator (`ami compare`)
-```
 
-## Why a fixed JSON output shape
+Image bytes are never put in the JSON. When the analysis stage asks for
+visuals (`withVisuals: true`), they come back separately, and only for
+the pages/pictures flagged `needsVision`.
 
-Every prompt (`promptTemplates.js`) asks the model for the same JSON object: `summary`, `extracted_text`, `visual_elements[]`, `tables[]`, `key_entities[]`, `confidence`, `notes`. This is what makes the comparison engine possible - without a common shape, "compare Qwen vs Claude" would mean diffing two different unstructured essays by eye. `responseParser.js` extracts that JSON defensively (handles code fences, leading/trailing prose) and falls back to a safe empty shape - with the raw text preserved - if a model ignores the instruction, so one bad response never crashes a batch.
+## Design decisions
 
-## Concurrency and rate limits
+- **No disk.** Drive files, uploads and ZIP contents are handled in
+  memory or through byte ranges. The only things written are the output
+  JSON and, if `CACHE_DIR` is set, cached JSON. See
+  [OPTIMIZATION.md](./OPTIMIZATION.md) for the reasoning and the numbers.
+- **Reading never needs a model.** The model SDKs load lazily and only
+  the analysis commands create a client.
+- **MarkItDown is an upgrade, not a dependency.** Every format has a
+  pure-JS path. When the Python worker is available it improves the
+  markdown (DOCX/PPTX/XLSX/CSV/HTML). `.xls` is the one format that
+  needs it.
+- **One bad file never sinks a batch.** Inside a ZIP or a Drive folder,
+  a file that fails gets an `error` entry and the rest carry on.
+- **Fixed JSON for model output too.** The analysis prompts still ask
+  every model for the same JSON shape (`promptTemplates.js`), which is
+  what makes the Qwen vs Claude comparison possible.
 
-`analyzeDocument.js` processes a document's images with a small worker pool (default concurrency 3, configurable) instead of `Promise.all` over everything - a 40-page PDF shouldn't fire 40 simultaneous requests at a provider's rate limit. `utils/retry.js` adds exponential backoff on top for the requests that do get rate-limited or hit a transient 5xx.
+## Security
 
-## Security considerations
-
-- **Zip-slip**: every ZIP entry's resolved path is checked against the extraction directory before writing; entries that would escape it are skipped and logged (`ingestion/zipExtractor.js`).
-- **Zip-bomb**: entry count and total uncompressed size are capped before extraction begins.
-- **Untrusted PDFs**: `isEvalSupported: false` is passed to pdf.js so a malicious PDF cannot use pdf.js's optional JS-evaluation code paths.
-- **No secrets in code**: API keys are read from `.env` (gitignored) via `src/config.js`; `.env.example` documents the required variables with empty values.
+- ZIPs are never extracted to disk, so zip-slip can't happen. Entry
+  names are only labels. Entry count, per-entry size, total inflated
+  bytes and compression ratio are all capped (`src/reader/zip.js`), and
+  archives nest at most 3 deep.
+- Drive folder and file ids are validated against `[A-Za-z0-9_-]` before
+  they go into a Drive query, so a crafted id can't change the query.
+- `callDrive()` strips the googleapis error (which references the auth
+  client and key) before anything is logged or returned.
+- pdf.js runs with `isEvalSupported: false`.
+- GUI: binds to 127.0.0.1 by default and refuses to bind elsewhere
+  without `GUI_ACCESS_KEY`. OAuth callbacks need a one-time `state`.
+  Static files are served from a fixed folder only. The UI builds all
+  DOM through `textContent`, never `innerHTML`, under a strict CSP.
+  Uploads have a size cap enforced while streaming.

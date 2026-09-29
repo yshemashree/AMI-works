@@ -8,7 +8,7 @@ This is a status document, not a finished comparison report. Being direct about 
 
 ## What's ready to run right now
 
-The full comparison pipeline is implemented and unit-tested against mocked model responses (`src/comparison/`, `test/metrics.test.js`, `test/reportGenerator.test.js` - 45 tests passing, see [TESTING.md](./TESTING.md)):
+The full comparison pipeline is implemented and unit-tested against mocked model responses (`src/comparison/`, `test/metrics.test.js`, `test/reportGenerator.test.js` - part of the `npm test` suite, see [TESTING.md](./TESTING.md)):
 
 - Runs **identical inputs and identical prompts** through Claude and Qwen (`runComparison.js`) - a same-conditions comparison, not an apples-to-oranges one.
 - Computes, per file and in aggregate (`metrics.js`):
@@ -28,7 +28,7 @@ cp .env.example .env
 # put representative files in ./samples (PDFs with charts/tables, DOCX/PPTX with
 # embedded images, standalone screenshots, a ZIP bundling a mix of all of them)
 
-node bin/ami.js compare ./samples --ground-truth ./samples/ground-truth.json --out reports
+node bin/ami.js compare ./samples --ground-truth ./samples/ground-truth.json --out reports   # add --all-pages to send every PDF page
 ```
 
 This writes `reports/comparison-report.json` (full data) and `reports/comparison-report.md` (the human-readable report with the recommendation). `--ground-truth` is optional but strongly recommended - without it, the recommendation can only speak to reliability/consistency, not accuracy (the report says this explicitly rather than guessing).

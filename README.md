@@ -1,41 +1,62 @@
-# AMI Image Understanding
+# AMI File Reading & Image Understanding
 
-Node.js pipeline for extracting and analyzing visual content (images, and the visuals embedded in PDF/DOCX/PPTX documents, including from direct ZIP uploads) with vision-capable LLMs, plus a harness for comparing Qwen-VL against Claude on identical inputs.
+Reads the files AMI receives (PDF, Word, PowerPoint, Excel, images, CSV/HTML/text and ZIPs of any of those) from **Google Drive, a browser upload or a local path** into one structured JSON format. There's a small web GUI for uploads, and an optional image-understanding stage (Qwen-VL vs Claude) on top.
 
-Updates as of 17/09/2026.
+Updates as of 23/09/2026.
 
-## What this does
+## What changed in this round
 
-- Accepts a single image, a PDF, a DOCX, a PPTX, a ZIP bundling any mix of those, or a whole directory.
-- For a ZIP, extracts and processes every supported file inside it (including nested folders).
-- For documents, analyzes not just body text but the visual content - charts, diagrams, tables, screenshots, photos - by rendering PDF pages to images and pulling out every embedded picture in DOCX/PPTX.
-- Runs the same files through both Claude and Qwen-VL under identical prompts/conditions and produces a metrics-based comparison report (reliability, consistency, visual-understanding proxies, and accuracy when ground truth is supplied).
+- **Reading doesn't need a model or an API key.** `ami read`, `ami drive-read` and the GUI are fully local. Models are only used by `analyze`/`compare`, and only for the pages and pictures that need them.
+- **Everything becomes JSON** (`ami.document/v1`): text, markdown, per-page/slide/sheet sections, properties, native chart data, the picture list, and a per-section "does this need a vision model?" verdict.
+- **Nothing goes to disk.** Drive files, uploads and ZIP contents are read in memory or by byte range, never saved to the server. A 300 MB deck (mostly video) takes 0.4 MB of transfer and 72 MB of RAM.
+- **MarkItDown (the earlier Microsoft-tool integration) is part of the reader.** It runs as one long-lived Python worker fed over stdin, ~5x faster per file than a process per file. It's optional; there's a pure-JS path for every format.
+- **Upload GUI** instead of the CLI: drag and drop, progress bars, Drive folder browser, JSON viewer and download.
+- **Component-based layout**: `drive/`, `reader/`, `markitdown/`, `pipeline/`, `server/`, `analysis/`, each with its own public API.
 
-See [docs/](./docs) for the full technical documentation:
-
-| Doc | Covers |
-|---|---|
-| [ARCHITECTURE.md](./docs/ARCHITECTURE.md) | module map, data flow, design rationale |
-| [SETUP.md](./docs/SETUP.md) | install, configure API keys, run |
-| [API.md](./docs/API.md) | CLI flags and programmatic (JS) API |
-| [PROCESSING_FLOW.md](./docs/PROCESSING_FLOW.md) | step-by-step: input → extraction → analysis → report |
-| [SUPPORTED_FORMATS.md](./docs/SUPPORTED_FORMATS.md) | what's supported, what isn't, and why |
-| [TESTING.md](./docs/TESTING.md) | what `npm test` covers and what still needs real API keys |
-| [RESULTS.md](./docs/RESULTS.md) | Qwen vs. Claude comparison status - **read this first** for the current state of the comparison |
-| [LIMITATIONS.md](./docs/LIMITATIONS.md) | known gaps and deliberate tradeoffs |
+Why these choices, with measurements: **[docs/OPTIMIZATION.md](./docs/OPTIMIZATION.md)**.
 
 ## Quick start
 
 ```bash
 npm install
-cp .env.example .env   # fill in ANTHROPIC_API_KEY / DASHSCOPE_API_KEY
-npm test                # 45 unit tests, no API keys needed
+cp .env.example .env
+pip install -r src/markitdown/requirements.txt   # optional, richer markdown
 
-node bin/ami.js analyze ./samples/report.pdf --provider claude
-node bin/ami.js compare ./samples --ground-truth ./samples/ground-truth.json
+npm test                                          # 114 tests, no keys or network needed
+
+node bin/ami.js read ./samples/report.pdf ./samples/bundle.zip   # -> output/*.json
+npm run gui                                        # http://127.0.0.1:4300
 ```
 
-## Current status
+For Drive, set `GOOGLE_OAUTH_CLIENT_ID/SECRET` and `DRIVE_FOLDER_ID`, then click **Connect Google Drive** in the GUI (or run `ami drive-login`). Full steps are in [docs/SETUP.md](./docs/SETUP.md).
 
-- Ingestion (ZIP, image, PDF, DOCX, PPTX), extraction, model clients (Claude + Qwen), the analysis pipeline, and the comparison engine are implemented and unit-tested (45/45 passing).
-- **The live Qwen vs. Claude comparison has not been run yet** - this environment has no API keys and no curated ground-truth test set. See [docs/RESULTS.md](./docs/RESULTS.md) for exactly what's needed to produce real numbers and what the report will (and won't) claim once it's run.
+## Components
+
+```
+src/
+  reader/       bytes -> JSON, per format (no Drive, no network, no disk)
+  drive/        Google Drive: list, read (whole or by range), export, upload
+  markitdown/   MarkItDown as a long-lived Python worker (optional)
+  pipeline/     wires them: content-hash cache, memory budget, upload-and-read in one pass
+  server/       the GUI (HTTP + browser UI components)
+  analysis/  models/  comparison/   optional vision-model stage + Qwen vs Claude report
+```
+
+## Docs
+
+| Doc | Covers |
+|---|---|
+| [OPTIMIZATION.md](./docs/OPTIMIZATION.md) | the reading approach: no disk, range reads, caching, vision triage, and the numbers behind them |
+| [ARCHITECTURE.md](./docs/ARCHITECTURE.md) | components, the `Source` interface, the JSON schema, security |
+| [SETUP.md](./docs/SETUP.md) | install, Drive sign-in, GUI, settings |
+| [API.md](./docs/API.md) | CLI, HTTP endpoints, library functions |
+| [PROCESSING_FLOW.md](./docs/PROCESSING_FLOW.md) | step by step from bytes to JSON (and to model calls) |
+| [SUPPORTED_FORMATS.md](./docs/SUPPORTED_FORMATS.md) | what each format produces |
+| [TESTING.md](./docs/TESTING.md) | what the tests cover and what was checked by hand |
+| [RESULTS.md](./docs/RESULTS.md) | Qwen vs Claude comparison status |
+| [LIMITATIONS.md](./docs/LIMITATIONS.md) | known gaps and tradeoffs |
+
+## Status
+
+- Reader, Drive component, MarkItDown worker, pipeline, GUI and analysis stage are implemented and covered by `npm test` (114/114).
+- Not yet run against a live Drive folder or live model APIs. See [LIMITATIONS.md](./docs/LIMITATIONS.md) and [RESULTS.md](./docs/RESULTS.md).

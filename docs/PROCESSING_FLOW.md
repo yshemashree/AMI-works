@@ -1,54 +1,97 @@
 # Processing Flow
 
-## 1. Input resolution
+## 1. Where the bytes come from
 
-`ami analyze`/`ami compare` accept a file, a directory, or a `.zip`. `src/ingestion/pathResolver.js` normalizes all three into a flat list of individual file paths:
+Everything becomes a `Source` (see [ARCHITECTURE.md](./ARCHITECTURE.md)):
 
-- A file is checked against `isSupportedExtension()` and kept or skipped with a warning.
-- A directory is walked recursively; any ZIPs found inside it are expanded in place.
-- A ZIP is extracted via `src/ingestion/zipExtractor.js` into `<WORK_DIR>/extracted/<uuid>/`, after safety checks:
-  - **zip-slip**: an entry whose resolved path would land outside the extraction directory (e.g. `../../etc/passwd`) is skipped and logged, never written.
-  - **zip-bomb**: total entry count (max 5000) and total uncompressed size (max 500MB) are capped; an oversized archive is rejected before any extraction happens.
-  - macOS `__MACOSX/` metadata and dotfiles are skipped as noise, not content.
+- **Local path** (CLI): `fileSource(path)`. Directories are walked; ZIPs
+  are passed through whole and opened by the reader in memory.
+- **Browser upload** (GUI): the multipart body is parsed as a stream
+  (`busboy`). Nothing is buffered to disk.
+  - *Upload to Drive + read*: the bytes are piped to Drive, hashed (MD5)
+    and, if the file is under `RANGE_THRESHOLD_MB`, kept in memory, all
+    in one pass. The JSON is produced from that copy.
+  - *Read only*: collected into memory (capped) and read. Nothing is
+    stored.
+- **Drive file**: `driveSource(client, entry)`. The folder listing gives
+  size and MD5 for free.
 
-## 2. Extraction (per file)
+## 2. Cache check (Drive and uploads)
 
-`src/extractors/index.js` sniffs the file's category (extension, or magic bytes if the extension is missing/unknown) and dispatches:
+The key is the file's content MD5 (plus the schema version and whether
+MarkItDown is on). On a hit the stored JSON comes back and **no bytes are
+downloaded**. Google-native files (no MD5) key on id + modified time.
 
-- **Image** → loaded, downscaled if its longest side exceeds `MAX_IMAGE_DIMENSION` (default 2000px - keeps payloads reasonable without discarding the detail a vision model actually uses), re-encoded to base64 PNG.
-- **PDF** → for every page (capped at 200 pages as a safety limit): the text layer is pulled via pdf.js's `getTextContent()`, and the page is independently rendered to a PNG at 2x scale (~192 DPI) via `@napi-rs/canvas`. Both are kept - the render captures charts/diagrams/tables/scanned content the text layer can't.
-- **DOCX** → full document text via `mammoth.extractRawText()`; every file under `word/media/` in the underlying ZIP is pulled out as an embedded image.
-- **PPTX** → each `ppt/slides/slideN.xml` is parsed for `<a:t>` text runs (in slide order) via `fast-xml-parser`; every file under `ppt/media/` is pulled out as an embedded image.
+## 3. Read strategy
 
-The result is normalized to one shape regardless of format: `{ filePath, category, text, images: [{ base64, mimeType, label, ... }] }`.
+- Size ≤ `RANGE_THRESHOLD_MB` (default 32 MB): one GET into a Buffer
+  preallocated to the exact size.
+- Larger ZIP/DOCX/PPTX/XLSX/PDF: byte-range reads through a 256 KB
+  block cache. Only the table of contents and the parts we parse are
+  fetched.
+- Images and text: always whole, capped at `MAX_IN_MEMORY_MB`, and
+  refused before downloading if Drive already says they're bigger.
 
-## 3. Analysis (per image)
+Folder reads run `READ_CONCURRENCY` files at a time inside a
+`MEMORY_BUDGET_MB` budget.
 
-`src/analysis/analyzeDocument.js` takes that normalized result and calls `analyzeImage()` for every image, with bounded concurrency (default 3 at a time) so a large PDF doesn't fire dozens of simultaneous requests.
+## 4. Reading (per format)
 
-`analyzeImage()`:
-1. Picks a prompt from `promptTemplates.js` - the document-page prompt (includes the page's extracted text as hint context) for a rendered PDF page, or the generic image prompt for a standalone image / embedded picture.
-2. Sends the prompt + image to the model client (`ClaudeClient` or `QwenClient`), which both retry on 429/5xx via `utils/retry.js` before giving up.
-3. Parses the model's response text as the fixed JSON shape (`responseParser.js`), tolerating markdown code fences and stray prose around the JSON. A response that still can't be parsed is recorded with `parsed: false` and `confidence: "low"` rather than throwing - one bad response doesn't kill the batch.
+- **PDF** (pdf.js): per page, the text layer, plus a verdict. A page is
+  flagged `needsVision` if it has under 40 characters of text (scanned),
+  any image operators, or 25+ vector path operations (charts, diagrams).
+  In range mode, images aren't inspected (that would pull their bytes),
+  so the verdict uses text density only.
+- **DOCX**: MarkItDown markdown when the worker is up, otherwise mammoth
+  raw text. Properties from `docProps`. Native charts from
+  `word/charts/*`. Pictures from `word/media/*`.
+- **PPTX**: per-slide text from the slide XML, notes from
+  `notesSlides`, and which pictures and charts sit on which slide from
+  the slide relationships. Markdown from MarkItDown when available.
+- **XLSX**: every sheet read straight from its XML into a markdown table
+  (shared strings, inline strings, booleans). MarkItDown markdown when
+  available.
+- **Images**: dimensions from the header.
+- **Text**: UTF-8/UTF-16 BOM handling; CSV/TSV → table; HTML stripped
+  (or converted by MarkItDown); JSON pretty-printed.
+- **ZIP**: each supported entry is inflated on its own, read as a child
+  document and released. Junk (`__MACOSX/`, dotfiles) is ignored;
+  unsupported files are listed in `skipped`; a failing child gets an
+  `error` and the rest carry on.
 
-## 4a. Single-provider analysis (`ami analyze`)
+Pictures are deduplicated by CRC32 + size from the ZIP directory, and
+icon-sized ones (under 48 px) are marked as not worth a vision call.
 
-One JSON report per input file is written to the output directory, containing the extracted text plus every image's parsed analysis (summary, visual elements, tables, entities, confidence).
+## 5. Output
 
-## 4b. Comparison (`ami compare`)
+`readDocument()` returns `{ document, visuals }`. `document` is the
+`ami.document/v1` JSON. `visuals` is empty unless the caller asked for
+them.
 
-`src/comparison/runComparison.js` runs steps 2-3 through **both** Claude and Qwen, using identical extracted inputs and identical prompts, then for every image:
+- `ami read` / `ami drive-read`: one `.json` per file.
+- GUI: shown in the result panel (Summary / Text / Markdown / JSON) and
+  downloadable. "Read whole folder" streams one result per file as each
+  finishes.
 
-- Computes **text agreement** between the two models' `extracted_text` (word-overlap/Jaccard) - a consistency signal.
-- Computes **keyword recall** against ground truth if supplied - an accuracy signal.
+## 6. Image understanding (optional: `analyze`, `drive-analyze`, `compare`)
 
-`src/comparison/metrics.js` aggregates these plus JSON-parse success rate, latency, visual-element/table counts, and low-confidence counts per provider. `src/comparison/reportGenerator.js` writes the full data as JSON and a human-readable Markdown report with a recommendation section derived directly from that run's numbers (see [RESULTS.md](./RESULTS.md) for what that recommendation looks like and its limits).
+With `withVisuals: true` the reader also returns base64 images, but only
+for flagged PDF pages (rendered at ~192 DPI) and unique, non-icon
+pictures. `analyzeDocument` sends each one to the model with a fixed JSON
+prompt. For a PDF page, that page's own text goes along as a hint. ZIP
+children are analysed one at a time as they're read, so a big archive
+never has all its renders in memory together. `compare` sends the exact
+same visuals to Claude and Qwen.
 
-## Error handling philosophy
+## Error handling
 
-Every stage distinguishes **expected, recoverable** failures from **unexpected** ones:
-
-- Unsupported file type, legacy Office format, corrupt/empty ZIP, missing API key → typed `AmiError` subclasses (`src/utils/errors.js`) with a clear message and machine-readable `code`, caught at the CLI boundary and reported without a stack trace.
-- A single PDF page failing to render → logged and that page is skipped; the rest of the document still processes (`pdfExtractor.js`).
-- A single model call returning unparseable text → recorded as `parsed: false, confidence: "low"` with the raw text preserved, not thrown (`responseParser.js`); does not abort the rest of the batch.
-- Anything else → surfaced with its stack trace, since it indicates a real bug rather than a handled edge case.
+- Expected problems (unsupported type, legacy Office, corrupt file, file
+  too large, missing credentials, bad folder id) are `AmiError`s with a
+  `code`, shown in the CLI without a stack trace and returned by the
+  GUI as `{ error: { code, message } }` with a matching HTTP status.
+- A single PDF page failing is a warning; the rest of the document
+  still reads.
+- An unparseable model response is recorded as `parsed: false`, not
+  thrown.
+- MarkItDown failing (not installed, crashed, timed out, can't parse
+  that file) falls back to the built-in reader and adds a warning.

@@ -1,46 +1,44 @@
 # Testing
 
-## What's automated (`npm test`)
+## What `npm test` covers
 
-45 unit tests, run with Node's built-in test runner (`node --test`), no API keys or network access required. Fixtures are generated on the fly (`test/fixtures/generate-fixtures.mjs`, run automatically via the `pretest` npm script) rather than committed as binary files - a 2-page PDF, a DOCX with one embedded image, a PPTX with two slides and one embedded image, a PNG, and a ZIP bundling all of them plus one deliberately unsupported `.txt` file.
+114 tests, Node's built-in runner, no API keys and no network. Fixtures
+are generated on the fly (`test/fixtures/generate-fixtures.mjs`): PDFs, a
+DOCX, a plain PPTX, a "rich" PPTX (notes, a repeated logo, an icon, a
+native chart, properties), an XLSX, a PNG and a ZIP bundle with nested
+folders, junk and an unsupported file.
 
 | File | Covers |
 |---|---|
-| `fileTypeDetector.test.js` | extension detection, magic-byte fallback, legacy-Office flagging |
-| `zipExtractor.test.js` | correct extraction, **zip-slip rejection**, empty-zip rejection, corrupt-zip rejection, missing-file handling |
-| `extractors.test.js` | image/PDF/DOCX/PPTX extraction produce the expected text and images against the generated fixtures |
-| `pathResolver.test.js` | file / directory / ZIP input resolution, including nested ZIPs inside a directory |
-| `responseParser.test.js` | clean JSON, fenced JSON, JSON-with-prose, and unparseable-text fallback |
-| `metrics.test.js` | parse-success rate, text agreement, keyword recall, failure detection, visual-element stats |
-| `analyzeDocument.test.js` | correct prompt selection (page-render vs. standalone image), ordering, concurrency, using a mock model client |
-| `reportGenerator.test.js` | Markdown/JSON report generation, and specifically that it does **not** claim an accuracy winner when no ground truth was supplied |
-| `modelsAndConfig.test.js` | missing-credential errors fail fast, before any network call |
+| `reader.test.js` | the JSON shape for every format; **buffer vs range reads give the same result**; PDF triage and rendering only flagged pages; DOCX/PPTX/XLSX details (notes, native chart numbers, properties, sheets); picture dedupe and icon skipping; a large deck read by range fetches **under a quarter** of its bytes; CSV/HTML/BOM handling; in-memory ZIPs (junk, unsupported, "../" names, broken children, nesting limit, corrupt archive); the block cache |
+| `detect.test.js` | extension, mime and magic-byte detection |
+| `drive.test.js` | folder listing (pagination, kinds, Google-native exports, query-injection guard); Drive source (exact bytes, Range header, size limit before download, export); error wrapping never leaks the auth client |
+| `driveUploader.test.js` | CLI uploads: naming, folder handling, errors |
+| `pipeline.test.js` | reading a Drive folder in memory, per-file errors, **second run downloads nothing**, cache hit on a renamed copy; one-pass upload (bytes intact, checksum verified, JSON with no re-download); large-upload read-back; ResultCache (disk, copies, LRU); MemoryBudget never exceeds its limit |
+| `markitdown.test.js` | the Python worker: bytes over stdin, many files through one process, a corrupt file failing on its own, fallback when Python/markitdown is missing (the worker tests skip if markitdown isn't installed) |
+| `server.test.js` | the GUI server: UI and scripts served, path traversal refused, status, streaming upload → Drive → JSON, read-only extract, per-file errors, upload size limit, folder listing, NDJSON folder reads, 400s on bad ids, OAuth `state` (forged and replayed callbacks refused), access key |
+| `analyzeDocument.test.js`, `metrics.test.js`, `reportGenerator.test.js`, `responseParser.test.js`, `modelsAndConfig.test.js` | the analysis and comparison stage with a mock model client (unchanged behaviour) |
+| `extractors.test.js`, `localInputs.test.js` | the analysis-stage adapter and CLI input resolution |
 
-Model calls are mocked (`test/helpers/mockModelClient.js`) so the suite tests the pipeline's logic - extraction correctness, prompt selection, retry/error handling, metric math - independent of any live model's actual output quality. That's a deliberate boundary: **this suite proves the pipeline works; it does not and cannot prove Claude or Qwen answer correctly.**
+Drive is mocked (`test/helpers/mockDriveClient.js`, which supports Range
+requests and exports), and so are the models. The suite proves the
+pipeline logic. It can't prove a model reads a chart correctly.
 
-Run it:
-```bash
-npm test
-```
+## What was checked by hand
 
-## What requires real API keys (manual / not part of `npm test`)
+- The GUI in Chromium (desktop, dark mode, 390 px mobile): uploading,
+  browsing a folder, reading a single file, reading a whole folder,
+  opening files inside a ZIP. No console errors and no horizontal scroll
+  on mobile.
+- A real python-pptx deck with a native chart, a repeated picture and
+  notes, through both strategies, with and without MarkItDown.
+- The AMI-Markdown-Feature test files (docx, pptx, xlsx, csv, html,
+  json, xml, txt, empty, corrupt pdf, exe) through the reader with the
+  worker.
+- The numbers in [OPTIMIZATION.md](./OPTIMIZATION.md).
 
-- **`ami analyze <file> --provider claude|qwen`** - a real, single-provider run against real files. Verified manually during development (see below); requires `ANTHROPIC_API_KEY` or `DASHSCOPE_API_KEY`.
-- **`ami compare <files> [--ground-truth ...]`** - the actual Qwen vs. Claude comparison. Requires both keys. This is the step that produces [RESULTS.md](./RESULTS.md)'s data - see that file for why no live comparison numbers are included in this delivery.
+## Needs real credentials
 
-## What was verified manually during development
-
-Since this environment has no Claude/Qwen API keys configured, the following was verified by hand rather than by the automated suite, to make sure the pipeline is actually sound end-to-end, not just unit-clean:
-
-- Extracted a real 2-page PDF and confirmed the rendered page PNGs are visually correct (readable text, correct layout) by inspecting the output image directly - this caught and fixed a real bug (`standardFontDataUrl` was being passed as a `file://` URL, which pdf.js's Node code path doesn't accept - it reads the path directly via `fs.readFile`; text rendered as invisible glyphs until this was fixed).
-- Ran `ami analyze` against a ZIP bundling an image, a PDF, a DOCX (nested in a subfolder), and a PPTX (nested), and confirmed it correctly skipped the bundled `.txt` file and processed the other four.
-- Confirmed `MissingCredentialsError` fires before any network call when `ANTHROPIC_API_KEY`/`DASHSCOPE_API_KEY` are unset, so a misconfigured `.env` fails immediately and clearly instead of hanging or producing a confusing SDK error.
-
-## Adding your own test files
-
-Drop real files into a local folder (e.g. `samples/`) and run:
-
-```bash
-node bin/ami.js analyze ./samples --provider claude
-node bin/ami.js compare ./samples --ground-truth ./samples/ground-truth.json
-```
+- Live Drive: `ami drive-read`, the GUI's upload and folder panels
+  against a real folder.
+- Live models: `ami analyze`, `ami compare` (see [RESULTS.md](./RESULTS.md)).

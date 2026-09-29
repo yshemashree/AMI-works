@@ -1,18 +1,48 @@
 # Limitations
 
-## Known gaps in this delivery
+## Open items
 
-1. **No live Qwen vs. Claude comparison data yet.** This build environment has no `ANTHROPIC_API_KEY` or `DASHSCOPE_API_KEY` configured, and none were provided as part of this task. The comparison engine (`ami compare`), its metrics, and its report generator are built and unit-tested against mocked model responses, but nobody has run it against real files with real API keys. **This is the single biggest open item** - see [RESULTS.md](./RESULTS.md) for exactly what's needed to close it.
-2. **No accuracy ground truth yet.** Even once API keys are available, the automated metrics (JSON-parse success rate, latency, cross-model text agreement, visual-element counts) measure *reliability and consistency*, not *correctness*. A real accuracy score requires a human to curate expected answers (key facts/numbers/labels) for a representative set of test files - the `--ground-truth` mechanism exists for this but needs that curated data.
-3. **Native/editable Office charts aren't captured.** DOCX/PPTX charts inserted as an actual chart *object* (Word/PowerPoint's "Insert Chart", editable, backed by embedded spreadsheet data) are stored as chart XML, not as a picture - `word/media/`/`ppt/media/` only contains pasted/inserted *images*. This pipeline extracts embedded pictures, not chart objects, so a native chart's visual won't reach the vision model. A picture of a chart, or a chart pasted as an image, works fine.
-4. **DOCX doesn't get a full-page visual render.** Unlike PDF (rendered page-by-page via pdf.js), DOCX has no fixed pagination without a real layout engine, so only text + embedded pictures are analyzed - not a rendering of what the page would look like when printed (e.g. a table's borders/formatting, or precise on-page positioning, isn't visible to the model the way it is for a PDF page).
-5. **Legacy binary Office formats are rejected, not converted.** `.doc`/`.ppt` (pre-2007 OLE format) are detected and rejected with a clear error rather than silently failing, but this pipeline does not convert them to `.docx`/`.pptx` automatically. A user hitting this needs to re-save/export the file first.
-6. **Page/slide/entry caps exist for safety, not because of a hard technical ceiling.** PDFs cap at 200 pages, ZIPs cap at 5000 entries / 500MB uncompressed. These are configurable-in-code safety limits (see `pdfExtractor.js`, `zipExtractor.js`) chosen to avoid one pathological input stalling or crashing a batch run; they were not tuned against real production volumes.
-7. **No persistence/queue/API server.** This is a CLI + library, matching the task's Node.js implementation requirement, not a hosted service. Integrating it into an upload endpoint (accepting a ZIP over HTTP, storing results, etc.) is future work, not part of this delivery.
-8. **Cost/latency at scale is unmeasured.** Priority was explicitly accuracy/reliability over token optimization, so no effort went into minimizing prompt size or output tokens (the JSON schema is intentionally verbose per image) - a large batch's actual $ cost and wall-clock time against production volumes hasn't been measured against either provider.
+1. **No live Qwen vs Claude numbers yet.** The comparison runs and is
+   tested against mocks, but it hasn't been run with real keys and
+   ground truth. See [RESULTS.md](./RESULTS.md).
+2. **No live Drive run in CI.** Drive is mocked in tests (including
+   Range requests and exports). The first real-folder run should be
+   watched, especially reads through shared drives.
+3. **PDF triage is a heuristic.** A page is sent to vision if it has
+   little text, any images, or 25+ vector paths. A chart drawn with
+   fewer paths, or a table drawn only with text, can be marked "text
+   only". `--all-pages` is the escape hatch. In range mode (PDFs over
+   `RANGE_THRESHOLD_MB`) images aren't inspected, so triage uses text
+   density alone.
+4. **DOCX has no page renders.** Only text and embedded pictures, because
+   DOCX has no fixed pagination without a layout engine.
+5. **SmartArt, shapes and text boxes drawn with Office shapes** aren't
+   pictures and aren't charts, so they only contribute their text.
+   Native charts are read as data. Pasted pictures go to vision.
+6. **Legacy `.doc`/`.ppt` are rejected**, not converted. `.xls` works
+   only with the MarkItDown worker.
+7. **pdf.js holds a full-length buffer in range mode.** It's virtual
+   memory. On Linux, pages are only committed for chunks actually
+   fetched, which is why the 300 MB test stays around 72 MB resident.
+   On other platforms the allocation may be committed up front.
+8. **The memory budget is an estimate** (file size × 2 for in-memory
+   reads, a fixed working set for range reads). It keeps a busy folder
+   read predictable. It isn't a hard OS-level cap.
+9. **Google exports are capped at 10 MB by Google**, so very large
+   Google Docs/Slides fail with a Drive error rather than being read.
+10. **Uploads pass through the server.** That's what lets one pass
+    verify the checksum and produce the JSON, but for very large files
+    a direct browser→Drive resumable upload would use less server
+    bandwidth (see [OPTIMIZATION.md](./OPTIMIZATION.md#what-we-didnt-do-yet-and-why)).
 
-## Design tradeoffs worth knowing about
+## Design tradeoffs
 
-- **One model call per image**, not one call per document. This maximizes per-visual detail and keeps each response schema-conformant and independently parseable/comparable, at the cost of more total API calls (and more total tokens) than batching a whole document into one call. Given the stated priority (accuracy/reliability over token optimization), this tradeoff was made deliberately.
-- **Word-overlap "text agreement" between models is not a correctness signal** - it flags where Claude and Qwen disagree on a given image, which is useful for spotting cases worth a human look, but agreement between two models proves neither is right, and disagreement doesn't prove either is wrong. Don't read it as an accuracy score.
-- **The Markdown report's "Recommendation" section is generated from that specific run's numbers**, not a hardcoded verdict. Run it against a small or unrepresentative sample and it will (correctly) hedge or produce a weak signal - it's designed to get more meaningful as it's run against more real, representative files.
+- **One model call per visual**, not per document. More calls, but each
+  response is independently parseable and comparable. Triage and
+  deduplication keep the count down.
+- **Text agreement between models is a consistency signal, not
+  accuracy.** Only ground-truth keyword recall measures accuracy.
+- **Safety caps** (500 PDF pages, 5000 ZIP entries, 200 MB per ZIP
+  entry, 1 GB inflated per archive, 3 levels of nesting) are there to
+  stop one bad input stalling a batch. They weren't tuned against
+  production volumes.
