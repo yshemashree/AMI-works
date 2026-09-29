@@ -1,7 +1,7 @@
 {
   "name": "ami-image-understanding",
   "version": "1.0.0",
-  "description": "Image Understanding pipeline: ZIP/image/PDF/PPTX/DOCX ingestion, visual content extraction, and a Qwen-VL vs Claude comparison harness.",
+  "description": "AMI file reading: Drive/upload/ZIP ingestion into structured JSON (no model needed), a browser GUI for uploads, MarkItDown integration, and an optional Qwen-VL vs Claude image-understanding stage.",
   "type": "module",
   "main": "src/index.js",
   "bin": {
@@ -9,6 +9,8 @@
   },
   "scripts": {
     "start": "node bin/ami.js",
+    "gui": "node bin/ami.js gui",
+    "read": "node bin/ami.js read",
     "analyze": "node bin/ami.js analyze",
     "compare": "node bin/ami.js compare",
     "test": "node --test \"test/**/*.test.js\"",
@@ -23,12 +25,16 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.126.0",
     "@napi-rs/canvas": "^0.1.56",
-    "adm-zip": "^0.5.16",
+    "busboy": "^1.6.0",
     "dotenv": "^16.4.5",
     "fast-xml-parser": "^4.5.0",
     "googleapis": "^144.0.0",
     "jszip": "^3.10.1",
     "mammoth": "^1.8.0",
-    "pdfjs-dist": "^4.7.76"
+    "pdfjs-dist": "^4.7.76",
+    "yauzl": "^3.4.0"
+  },
+  "devDependencies": {
+    "adm-zip": "^0.5.16"
   }
 }

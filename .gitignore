@@ -10,6 +10,7 @@ npm-debug.log*
 
 # Runtime output (extracted zips, rendered pages, generated reports)
 .tmp/
+.cache/
 output/
 reports/*.json
 reports/*.md
@@ -28,5 +29,6 @@ test/fixtures/*.png
 test/fixtures/*.pdf
 test/fixtures/*.docx
 test/fixtures/*.pptx
+test/fixtures/*.xlsx
 test/fixtures/*.zip
 test/fixtures/*.tmp
