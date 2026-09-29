@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { uploadFile } from '../src/ingestion/driveUploader.js';
+import { uploadFile } from '../src/drive/index.js';
 import { config } from '../src/config.js';
 import { AmiError } from '../src/utils/errors.js';
 import { MockDriveClient, fakeDriveApiError } from './helpers/mockDriveClient.js';

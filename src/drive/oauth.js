@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { createInterface } from 'node:readline/promises';
@@ -27,6 +27,9 @@ export async function createOAuthDriveClient({ interactive = true } = {}) {
   if (saved) {
     const auth = newOAuthClient(google, loopbackUri());
     auth.setCredentials(saved);
+    // Access tokens are refreshed in the background; keep the file in
+    // step so a restart doesn't begin with an expired one.
+    auth.on('tokens', (fresh) => writeToken({ ...saved, ...fresh }));
     return google.drive({ version: 'v3', auth });
   }
   if (!interactive) {
@@ -37,6 +40,36 @@ export async function createOAuthDriveClient({ interactive = true } = {}) {
 
   const auth = await runConsentFlow(google);
   return google.drive({ version: 'v3', auth });
+}
+
+/**
+ * Browser sign-in for the GUI: the server redirects the user here, Google
+ * sends them back to `redirectUri` with a code, and completeLogin() swaps
+ * the code for a token. `state` guards the callback against CSRF.
+ */
+export async function buildAuthUrl(redirectUri, state) {
+  const { google } = await import('googleapis');
+  return newOAuthClient(google, redirectUri).generateAuthUrl({
+    access_type: 'offline',
+    prompt: 'consent',
+    scope: SCOPES,
+    state,
+  });
+}
+
+export async function completeLogin(code, redirectUri) {
+  const { google } = await import('googleapis');
+  const auth = newOAuthClient(google, redirectUri);
+  const { tokens } = await auth.getToken({ code, redirect_uri: redirectUri });
+  writeToken(tokens);
+}
+
+export function hasOAuthClientConfig() {
+  return Boolean(config.drive.oauth.clientId && config.drive.oauth.clientSecret);
+}
+
+export function signOut() {
+  rmSync(tokenPath(), { force: true });
 }
 
 export function tokenPath() {

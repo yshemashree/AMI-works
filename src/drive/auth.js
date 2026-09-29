@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { config } from '../config.js';
 import { AmiError, MissingCredentialsError } from '../utils/errors.js';
+import { createOAuthDriveClient, hasSavedToken } from './oauth.js';
 
 // Reader gets read-only. Uploader needs full drive, not drive.file: with
 // drive.file the app can only touch files it created, so creating into a
@@ -42,6 +43,20 @@ export async function createDriveClient(mode) {
 }
 
 /**
+ * Client for reading. The service account when one is configured,
+ * otherwise the signed-in user's token, so a single "Connect Google
+ * Drive" in the GUI is enough to both read and upload.
+ */
+export async function createReadClient() {
+  if (config.drive.keyPath) return createDriveClient('read');
+  if (hasSavedToken()) return createOAuthDriveClient({ interactive: false });
+  throw new AmiError(
+    'No Drive credentials. Set GOOGLE_SERVICE_ACCOUNT_KEY_PATH, or sign in (GUI "Connect Google Drive" or "ami drive-login").',
+    { code: 'MISSING_CREDENTIALS' },
+  );
+}
+
+/**
  * Runs one Drive API call and turns any failure into an AmiError.
  */
 export async function callDrive(fn) {
@@ -53,6 +68,9 @@ export async function callDrive(fn) {
 }
 
 function toDriveError(cause) {
+  // Already ours (an upload body that failed its size limit, say):
+  // pass it through rather than dressing it up as a Drive failure.
+  if (cause instanceof AmiError) return cause;
   const message = cause?.errors?.[0]?.message || cause?.message || 'unknown error';
   // No `cause` here on purpose. The googleapis error keeps a reference to
   // the auth client, and the auth client holds the parsed key.
