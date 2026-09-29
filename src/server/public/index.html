@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AMI File Intake</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/js/main.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <div>
+        <h1>AMI File Intake</h1>
+        <p class="muted">Upload to Drive, read any file into JSON. No model calls.</p>
+      </div>
+    </div>
+    <div id="status" class="status" aria-live="polite"></div>
+  </header>
+
+  <main class="layout">
+    <section id="upload" class="card" aria-labelledby="upload-title"></section>
+    <section id="drive" class="card" aria-labelledby="drive-title"></section>
+    <section id="viewer" class="card viewer" aria-labelledby="viewer-title"></section>
+  </main>
+</body>
+</html>
