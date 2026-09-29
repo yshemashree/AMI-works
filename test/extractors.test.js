@@ -1,6 +1,6 @@
 import { test, describe, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractFile } from '../src/extractors/index.js';
+import { extractFile, bufferSource } from '../src/reader/index.js';
 import { generateFixtures } from './fixtures/generate-fixtures.mjs';
 
 let fixtures;
@@ -60,6 +60,10 @@ describe('pptxExtractor (via extractFile)', () => {
 
 describe('extractFile error handling', () => {
   test('rejects unsupported file types with a clear error', async () => {
-    await assert.rejects(() => extractFile('test/fixtures/does-not-matter.xyz'), /Unsupported file type/i);
+    await assert.rejects(() => extractFile(bufferSource('does-not-matter.xyz', Buffer.from('?'))), /Unsupported file type/i);
+  });
+
+  test('rejects a missing file with FILE_NOT_FOUND', async () => {
+    await assert.rejects(() => extractFile('test/fixtures/nope.pdf'), (e) => e.code === 'FILE_NOT_FOUND');
   });
 });
